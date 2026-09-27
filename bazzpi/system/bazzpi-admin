@@ -1,0 +1,87 @@
+#!/usr/bin/python3 -I
+"""Fixed privileged operations. Installed root-owned; no shell interpolation."""
+import fcntl
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import shutil
+import subprocess as sp
+import sys
+
+os.environ.clear()
+os.environ.update(PATH='/usr/sbin:/usr/bin:/sbin:/bin', HOME='/root', LANG='C.UTF-8', TERM='linux')
+
+def run(args, **kwargs):
+    return sp.run(args, check=True, **kwargs)
+
+def gpu(value):
+    if value not in ('64','128','256'):
+        raise ValueError('GPU memory must be 64, 128 or 256.')
+    p=Path('/boot/firmware/config.txt')
+    if not p.exists(): p=Path('/boot/config.txt')
+    text=p.read_text()
+    if not Path(str(p)+'.bazzpi-backup').exists(): shutil.copy2(p,str(p)+'.bazzpi-backup')
+    text=re.sub(r'(?m)^\s*gpu_mem\s*=.*$', '# superseded by Bazzpi GPU memory setting',text)
+    p.write_text(text.rstrip()+'\n[all]\ngpu_mem='+value+'\n')
+
+def tty(args):
+    lock=open('/run/bazzpi-console.lock','w')
+    fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    old=sp.check_output(['fgconsole'],text=True).strip()
+    uid=pwd.getpwnam('play').pw_uid
+    cmd=['systemd-run','--unit=bazzpi-console','--wait','--collect',
+         '-p','User=play','-p','Group=play','-p','PAMName=login',
+         '-p','WorkingDirectory=/home/play','-p','TTYPath=/dev/tty8',
+         '-p','StandardInput=tty','-p','StandardOutput=journal','-p','StandardError=journal',
+         '-p','TTYReset=yes','-p','TTYVHangup=yes','-p','UtmpIdentifier=tty8',
+         '--setenv=HOME=/home/play','--setenv=USER=play','--setenv=LOGNAME=play',
+         '--setenv=TERM=linux',f'--setenv=XDG_RUNTIME_DIR=/run/user/{uid}',
+         '--setenv=SDL_AUDIODRIVER=pulseaudio']
+    try:
+        run(['chvt','8'])
+        run(cmd+args)
+    finally:
+        run(['chvt',old])
+
+
+def main(args):
+    if os.geteuid()!=0: raise ValueError('Run this helper through sudo.')
+    action=args[0] if args else ''
+    rest=args[1:]
+    if action=='gpu' and len(rest)==1: gpu(rest[0])
+    elif action=='hostname' and len(rest)==1 and re.fullmatch(r'[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?',rest[0]):
+        run(['raspi-config','nonint','do_hostname',rest[0]])
+    elif action=='country' and len(rest)==1 and re.fullmatch('[A-Z]{2}',rest[0]):
+        run(['raspi-config','nonint','do_wifi_country',rest[0]])
+    elif action=='timezone' and len(rest)==1:
+        valid=sp.check_output(['timedatectl','list-timezones'],text=True).splitlines()
+        if rest[0] not in valid: raise ValueError('Unknown timezone.')
+        run(['timedatectl','set-timezone',rest[0]])
+    elif action=='ssh' and rest in (['on'],['off']):
+        if rest==['on']:
+            # An OS password is deliberately distinct from the shelf PIN.
+            status=sp.check_output(['passwd','-S','play'],text=True).split()[1]
+            if status!='P': raise ValueError('Set the play Linux password in Settings before enabling SSH.')
+        run(['systemctl','enable' if rest==['on'] else 'disable','--now','ssh'])
+    elif action=='password' and not rest: run(['passwd','play'])
+    elif action=='wifi' and not rest: run(['nmtui'])
+    elif action=='reboot' and not rest: run(['systemctl','reboot'])
+    elif action=='poweroff' and not rest: run(['systemctl','poweroff'])
+    elif action=='retropie-install' and not rest: run(['/opt/bazzpi/system/install-retropie.sh'])
+    elif action=='retro' and not rest: tty(['/usr/bin/emulationstation'])
+    elif action=='stream' and len(rest)==6:
+        # Import only this root-owned installation, never the caller's cwd/PYTHONPATH.
+        sys.path.insert(0,'/opt/bazzpi/app')
+        from model import stream_args
+        pc,app,res,fps,rate,codec=rest
+        cmd=stream_args(dict(host=pc,resolution=res,fps=int(fps),bitrate=int(rate),codec=codec),app)
+        tty(['/usr/bin/moonlight-qt']+cmd)
+    else: raise ValueError('Unsupported action or invalid arguments.')
+
+if __name__=='__main__':
+    try: main(sys.argv[1:])
+    except (ValueError,OSError,sp.CalledProcessError) as e:
+        print(str(e),file=sys.stderr)
+        sys.exit(1)

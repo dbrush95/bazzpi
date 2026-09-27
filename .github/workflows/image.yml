@@ -1,0 +1,45 @@
+name: Build complete Bazzpi Pi 4 image
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'bazzpi/**'
+      - 'image/**'
+      - '.github/workflows/image.yml'
+concurrency:
+  group: bazzpi-image-${{ github.ref }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  image:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check native ARM64 runner and free disk
+        run: |
+          uname -m
+          df -h /
+          test "$(uname -m)" = aarch64
+      - name: Build image with native RetroPie included
+        run: sudo bash image/build.sh
+      - name: Save diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Bazzpi-build-logs
+          path: output/logs/
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Save flashable image only after successful build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Bazzpi-Pi4-Complete-Image
+          path: |
+            output/Bazzpi-Pi4.img.xz
+            output/Bazzpi-Pi4.img.xz.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
